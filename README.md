@@ -22,6 +22,8 @@ This repository contains **only** the **963causal Agent** — the component that
 
 It does **not** contain proprietary scoring engines, insurance certificate issuance logic, or HQ analytics. Those live in **private** infrastructure. That separation is intentional: auditors can review **exactly** what runs on the host without wading through unrelated algorithms.
 
+For the enrollment handshake diagram and module map, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
 ---
 
 ## Nature of the agent
