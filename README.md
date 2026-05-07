@@ -124,7 +124,7 @@ This tree is scrubbed for operator secrets before publication:
 
 ## License
 
-See `LICENSE` if present; otherwise refer to the license file added by the publisher for this public mirror.
+Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE). Attribution notice: [`NOTICE`](NOTICE).
 
 ---
 
