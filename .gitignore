@@ -1,7 +1,8 @@
 /bin/
 **/bin/
 /dist/
-963causal-agent
+# Built binary at repo root only (not cmd/963causal-agent/)
+/963causal-agent
 *.exe
 *.test
 

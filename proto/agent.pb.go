@@ -163,8 +163,10 @@ type EnrollResponse struct {
 	HeartbeatIntervalSec uint32                 `protobuf:"varint,6,opt,name=heartbeat_interval_sec,json=heartbeatIntervalSec,proto3" json:"heartbeat_interval_sec,omitempty"`
 	FrameEpochSec        uint32                 `protobuf:"varint,7,opt,name=frame_epoch_sec,json=frameEpochSec,proto3" json:"frame_epoch_sec,omitempty"`    // seconds per measurement epoch
 	GracePeriodSec       uint32                 `protobuf:"varint,8,opt,name=grace_period_sec,json=gracePeriodSec,proto3" json:"grace_period_sec,omitempty"` // how long agent may run without heartbeat
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Same derivation as DB agent_enrollments.causalId (SHA-256(pub) hex prefix).
+	CausalId      string `protobuf:"bytes,9,opt,name=causal_id,json=causalId,proto3" json:"causal_id,omitempty"` // e.g. CID-963-XXXXXXXX-XXXXXXXX for public verify portal
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnrollResponse) Reset() {
@@ -251,6 +253,13 @@ func (x *EnrollResponse) GetGracePeriodSec() uint32 {
 		return x.GracePeriodSec
 	}
 	return 0
+}
+
+func (x *EnrollResponse) GetCausalId() string {
+	if x != nil {
+		return x.CausalId
+	}
+	return ""
 }
 
 type ProbeConfig struct {
@@ -1937,7 +1946,7 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\x0ftotal_memory_kb\x18\n" +
 	" \x01(\x04R\rtotalMemoryKb\x12\x14\n" +
 	"\x05nonce\x18\v \x01(\x03R\x05nonce\x12%\n" +
-	"\x0etimestamp_unix\x18\f \x01(\x03R\rtimestampUnix\"\xd0\x02\n" +
+	"\x0etimestamp_unix\x18\f \x01(\x03R\rtimestampUnix\"\xed\x02\n" +
 	"\x0eEnrollResponse\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1f\n" +
 	"\vagent_token\x18\x02 \x01(\tR\n" +
@@ -1947,7 +1956,8 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\rpayload_nonce\x18\x05 \x01(\fR\fpayloadNonce\x124\n" +
 	"\x16heartbeat_interval_sec\x18\x06 \x01(\rR\x14heartbeatIntervalSec\x12&\n" +
 	"\x0fframe_epoch_sec\x18\a \x01(\rR\rframeEpochSec\x12(\n" +
-	"\x10grace_period_sec\x18\b \x01(\rR\x0egracePeriodSec\"\xac\x02\n" +
+	"\x10grace_period_sec\x18\b \x01(\rR\x0egracePeriodSec\x12\x1b\n" +
+	"\tcausal_id\x18\t \x01(\tR\bcausalId\"\xac\x02\n" +
 	"\vProbeConfig\x12\x1b\n" +
 	"\tepoch_sec\x18\x01 \x01(\rR\bepochSec\x12%\n" +
 	"\x0esyscall_probes\x18\x02 \x03(\tR\rsyscallProbes\x12)\n" +

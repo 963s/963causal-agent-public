@@ -33,6 +33,8 @@ message EnrollResponse {
   uint32 heartbeat_interval_sec = 6;
   uint32 frame_epoch_sec   = 7;  // seconds per measurement epoch
   uint32 grace_period_sec  = 8;  // how long agent may run without heartbeat
+  // Same derivation as DB agent_enrollments.causalId (SHA-256(pub) hex prefix).
+  string causal_id         = 9;  // e.g. CID-963-XXXXXXXX-XXXXXXXX for public verify portal
 }
 
 // ===========================================================================
