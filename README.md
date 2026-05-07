@@ -1,77 +1,41 @@
-<p align="center">
-  <img src="assets/963causal-mark.svg" alt="963causal" width="72" height="72" />
-</p>
+# 963causal Agent
 
-<h1 align="center">963causal Agent</h1>
+<img src="assets/963causal-mark.svg" width="56" height="56" alt="963causal logo">
 
-<p align="center">
-  <strong>Open-source runtime probe for Linux hosts.</strong><br />
-  Passive telemetry · Signed frames · Auditable codebase
-</p>
+Linux agent that collects runtime timing and noise signals, signs its telemetry, and sends it to your control plane over TLS. This repository is the agent only. Analysis engines, underwriting workflows, and operator dashboards are not included; they stay on private systems so reviewers can focus on what actually runs on the host.
 
-<p align="center">
-  <a href="https://963causal.com">Website</a> ·
-  <a href="https://963causal.com/verify">Verify integrity (public portal)</a>
-</p>
+More detail on enrollment crypto and package layout: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
----
+## What it does
 
-## What this repository is
+The process is measurement heavy, not content invasive. It records structured signals such as timing ratios and, where enabled, witness or PUF attestations. It does not read keystrokes, file bodies, or application data. After a licensed enroll step, probe settings arrive encrypted; the on disk binary does not hide alternate probe logic in the public source tree. Outbound traffic uses TLS; frames are signed with Ed25519 so the server can drop forged uploads.
 
-This repository contains **only** the **963causal Agent** — the component that runs on customer servers, collects **physically grounded timing and noise signals** from the running kernel and userspace (within documented probes), and ships **cryptographically signed telemetry** to your configured control plane.
+## Where to read the code
 
-It does **not** contain proprietary scoring engines, insurance certificate issuance logic, or HQ analytics. Those live in **private** infrastructure. That separation is intentional: auditors can review **exactly** what runs on the host without wading through unrelated algorithms.
+| Area | Path |
+|------|------|
+| Main binary | `cmd/963causal-agent/` |
+| Enroll and session handling | `internal/license/`, `internal/payload/`, `internal/identity/` |
+| Wire format | `proto/agent.proto` and call sites under `cmd/` and `internal/` |
+| Probes (userspace and optional eBPF) | `internal/probe/`, `internal/sentinel/` |
+| Packaging and install helper | `packaging/`, `scripts/install-agent-from-url.sh` |
 
-For the enrollment handshake diagram and module map, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+Compare release tarballs to git tags, rebuild with `make release`, and check hashes against published assets if you need a reproducible path.
 
----
+## Security (short)
 
-## Nature of the agent
+Keys used to sign frames live on the host (`keystore_path` in config). Traffic uses HTTPS plus signatures on frames. Probe material decrypts only after enroll; session material is handled as described in `internal/payload/session.go`. For a threat oriented writeup see `redteam/THREAT-MODEL.md`. The `cmd/redteam/` tools are for lab use, not part of a normal install.
 
-The agent acts as a **passive / bounded data collector**:
+## Install a release binary
 
-- It measures **stable, declarative signals** (timing ratios, witness-backed randomness anchors where configured, PUF-related attestations when enrolled, etc.) — not keystrokes, file contents, or application payloads.
-- Probe configuration is **delivered encrypted** after license-bound enrollment; the binary on disk does **not** embed hidden probe logic — see `README.md` (original technical overview) under **Identity-bound encryption handshake** in-repo.
-- Network outbound traffic is **TLS** to your operator’s control plane; frames are **Ed25519-signed** so the server can reject forged telemetry.
-
-This design supports **transparency**: there is no “secret branch” of behaviour inside the public tree — what you build from this source is what runs (modulo your licensed payload from the control plane).
-
----
-
-## Transparency & audit
-
-| Topic | What to review |
-|--------|----------------|
-| **Main entrypoint** | `cmd/963causal-agent/` |
-| **Enrollment & session crypto** | `internal/license/`, `internal/payload/`, `internal/identity/` |
-| **Signed outbound frames** | `proto/agent.proto`, protobuf wiring in `cmd/` / `internal/` |
-| **Kernel-facing probes** | `internal/probe/`, `internal/sentinel/` (optional eBPF — best-effort on hardened systemd units) |
-| **Operational packaging** | `packaging/`, `scripts/install-agent-from-url.sh` |
-
-Third parties are encouraged to **diff releases against tags**, **reproducibly build** (`make release`), and compare hashes with published release artifacts.
-
----
-
-## Security model (short)
-
-1. **At rest (customer host):** Ed25519 signing keys are stored locally (`keystore_path` in config); private keys are not uploaded to 963causal as usable long-term secrets for impersonation of the customer’s workload — enrollment binds identity to hardware fingerprinting policy enforced server-side.
-2. **In transit:** HTTPS to the control plane; application-layer signatures on telemetry frames.
-3. **Payload secrecy:** Encrypted probe bundle decrypted only after successful handshake; session keys are volatile (see `internal/payload/session.go`).
-
-For a deeper threat-oriented discussion, see `redteam/THREAT-MODEL.md` (research / QA tooling under `cmd/redteam/` is **not** required for production installs).
-
----
-
-## Quick install (binary)
-
-Published releases attach static Linux binaries (`amd64`, `arm64`). After your operator provides a **download URL** and **license key**:
+Your operator gives you a download URL and a license key. Example:
 
 ```bash
 sudo CAUSAL_DOWNLOAD_URL="https://github.com/963s/963causal-agent-public/releases/download/<tag>/963causal-agent_linux_amd64.tar.gz" \
   bash scripts/install-agent-from-url.sh
 ```
 
-Then create `/etc/963causal/agent.yaml` with at least:
+Then configure `/etc/963causal/agent.yaml`, for example:
 
 ```yaml
 control_plane_url: "https://your-control-plane.example"
@@ -80,19 +44,21 @@ keystore_path: "/var/lib/963causal/host.key"
 log_level: "info"
 ```
 
-See `packaging/install.sh` for a fuller guided install when packaging artifacts are laid out next to it.
-
----
+If you ship the full packaging layout beside `packaging/install.sh`, that script walks through a fuller setup.
 
 ## Build from source
 
-Requirements: **Go** (see `go.mod` for the declared toolchain version).
+Use the Go version listed in `go.mod`.
 
 ```bash
 git clone https://github.com/963s/963causal-agent-public.git
 cd 963causal-agent-public
-make release          # outputs under bin/
-# or single-target:
+make release
+```
+
+Single target example:
+
+```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/963causal-agent ./cmd/963causal-agent
 ```
 
@@ -102,34 +68,22 @@ Run:
 ./bin/963causal-agent -config /path/to/agent.yaml
 ```
 
----
+## Check a Causal ID or certificate
 
-## Verify certificates / Causal ID (end users)
+End users verify artefacts through the public site:
 
-After enrollment, customers receive a **Causal ID** and related artefacts through your operator’s flows. **Public verification** of integrity artefacts is documented at:
+https://963causal.com/verify
 
-**https://963causal.com/verify**
+Extra issuer specific flows (for example COSE exports) follow whatever your operator documents.
 
-(Operator-specific EAR / COSE exports may use additional endpoints — your operator documents those.)
+## Hygiene of this tree
 
----
-
-## Repository hygiene
-
-This tree is scrubbed for operator secrets before publication:
-
-- No `.git` history from the private monorepo (fresh history starts here).
-- No committed `.env`, host keys, or PEM material.
-- Internal lab IPs in **test code** may still use `127.0.0.1` — that is standard loopback for unit tests, not production infrastructure.
-
----
+This repo starts from a clean git history. It should not contain `.env` files, host keys, or PEM material. Tests may use `127.0.0.1`; that is normal loopback and not a production endpoint.
 
 ## License
 
-Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE). Attribution notice: [`NOTICE`](NOTICE).
-
----
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Contact
 
-Operator support and enterprise documentation are provided through **963causal** commercial channels linked from [963causal.com](https://963causal.com).
+Product and support links: [963causal.com](https://963causal.com).
