@@ -1,0 +1,340 @@
+syntax = "proto3";
+
+package causal963.agent.v1;
+
+option go_package = "github.com/963causal/agent/proto;agentpb";
+
+// ===========================================================================
+// Enrollment (first contact)
+// Agent -> Sentinel Control Plane
+// ===========================================================================
+
+message EnrollRequest {
+  string license_key      = 1;  // provisioned at install time
+  bytes  public_key       = 2;  // Ed25519 public key (32 bytes)
+  bytes  x25519_public    = 3;  // X25519 public key (32 bytes) for ECDH
+  string hw_fingerprint   = 4;  // sha3-256 hex of hardware identifiers
+  string agent_version    = 5;
+  string hostname         = 6;
+  string os_release       = 7;
+  string kernel           = 8;
+  string cpu_model        = 9;
+  uint64 total_memory_kb  = 10;
+  int64  nonce            = 11;  // anti-replay
+  int64  timestamp_unix   = 12;
+}
+
+message EnrollResponse {
+  string host_id           = 1;
+  string agent_token       = 2;  // opaque bearer for frame/heartbeat
+  bytes  server_x25519_pub = 3;  // ECDH server pub (32 bytes)
+  bytes  encrypted_payload = 4;  // ChaCha20-Poly1305 ciphertext of probe config
+  bytes  payload_nonce     = 5;  // 12 bytes
+  uint32 heartbeat_interval_sec = 6;
+  uint32 frame_epoch_sec   = 7;  // seconds per measurement epoch
+  uint32 grace_period_sec  = 8;  // how long agent may run without heartbeat
+}
+
+// ===========================================================================
+// Probe configuration (encrypted payload, decrypted in RAM only)
+// ===========================================================================
+
+message ProbeConfig {
+  uint32 epoch_sec                = 1;
+  repeated string syscall_probes  = 2;  // e.g. ["read","write","openat","execve","connect","accept"]
+  bool   sample_schedstat         = 3;
+  bool   sample_page_faults       = 4;
+  bool   sample_tcp_rtt           = 5;
+  uint32 histogram_significant_digits = 6;  // HDR precision (2 or 3)
+  uint64 version                  = 7;      // probe config version counter
+}
+
+// ===========================================================================
+// Measurement frame (agent -> server, every frame_epoch_sec)
+// Signed with host Ed25519 private key
+// ===========================================================================
+
+message Frame {
+  string host_id        = 1;
+  uint64 sequence       = 2;  // monotonic per-agent
+  int64  epoch_start    = 3;  // unix millis
+  int64  epoch_end      = 4;  // unix millis
+
+  // Syscall latency histograms (one per probed syscall).
+  repeated HdrHistogram syscall_hist = 5;
+
+  // Scheduler fingerprint
+  SchedulerDigest sched = 6;
+
+  // Page fault counters
+  FaultDigest faults    = 7;
+
+  // Derived vertices for sculpture reconstruction (24-dim default).
+  repeated double vertices = 8;
+
+  // Preliminary genotype computed on the agent (server recomputes).
+  string genotype       = 9;
+
+  // Hardware + environment re-check
+  string hw_fingerprint = 10;
+
+  // W3: Multi-Source Time Consensus (physics layer).
+  // Measures divergence between independent time sources. On bare metal the
+  // hardware counter ratio is exactly 1.0; under a manipulative hypervisor or
+  // rootkit intercepting the time path, it drifts.
+  TimeConsensusDigest time_consensus = 11;
+
+  // W3: External Witness — an unforgeable external reference (drand beacon)
+  // proving the agent was executing inside a specific real-time window that
+  // no offline adversary could have predicted in advance.
+  ExternalWitness witness = 12;
+}
+
+// ===========================================================================
+// W3 Physics Layer digests
+// ===========================================================================
+
+// TimeConsensusDigest captures statistics comparing multiple independent
+// clock sources over the epoch. See internal/probe/mstc.go for the math.
+//
+//   HW      = ARM CNTVCT_EL0 / x86 RDTSC  (hardware-architected counter)
+//   HW2     = ARM CNTPCT_EL0 / x86 RDTSCP (alternate hardware path)
+//   VDSO    = clock_gettime(CLOCK_MONOTONIC_RAW) via vDSO fast path
+//   SYSCALL = same clock via forced syscall (SYS_clock_gettime)
+//
+// Null hypothesis on clean bare metal: all four advance at the same rate,
+// modulo tiny phase noise (~1e-6 relative). Hypervisors/rootkits that
+// intercept any single path introduce measurable divergence.
+message TimeConsensusDigest {
+  // Architecture of the measurement host (arm64 | amd64).
+  string arch            = 1;
+  // Hardware counter frequency in Hz (CNTFRQ_EL0 on ARM, estimated on x86).
+  uint64 hw_hz           = 2;
+
+  // Ratio statistics over the epoch, computed with Welford's online algorithm.
+  // ratio_hw_vdso = Δ(HW)/Δ(VDSO)   — baseline 1.0 on bare metal.
+  double ratio_hw_vdso_mean   = 3;
+  double ratio_hw_vdso_stddev = 4;
+  // ratio_vdso_syscall = Δ(VDSO)/Δ(SYSCALL) — baseline 1.0; diverges when
+  // vdso is bypassed or when syscall path is trapped by a hypervisor.
+  double ratio_vdso_syscall_mean   = 5;
+  double ratio_vdso_syscall_stddev = 6;
+  // ratio_hw_hw2 = Δ(HW)/Δ(HW2) — baseline 1.0; diverges only if two distinct
+  // counter-read paths are intercepted inconsistently.
+  double ratio_hw_hw2_mean   = 7;
+  double ratio_hw_hw2_stddev = 8;
+
+  // Per-sample latency histograms (cycles) for each time source. A hidden
+  // hypervisor inflates the tail of instructions that it traps (e.g. RDTSC
+  // with TSC_OFFSETTING disabled; CNTVCT_EL0 under EL2 trap).
+  // Values are p50 and p99 in nanoseconds (derived from cycle counts / hw_hz).
+  double hw_read_p50_ns    = 9;
+  double hw_read_p99_ns    = 10;
+  double vdso_read_p50_ns  = 11;
+  double vdso_read_p99_ns  = 12;
+  double syscall_read_p50_ns = 13;
+  double syscall_read_p99_ns = 14;
+
+  uint32 sample_count      = 15;
+}
+
+// ExternalWitness carries a freshly-fetched public randomness beacon value
+// that the agent captured during this epoch. The server verifies the round
+// number and signature against the public drand chain, proving the frame
+// could not have been pre-fabricated offline.
+//
+// Chain used: League of Entropy (https://drand.love) — 30-second rounds,
+// BLS12-381 threshold signature from 15+ independent operators.
+message ExternalWitness {
+  // drand chain hash (identifies the public BLS key set).
+  string chain_hash      = 1;
+  // Round number at the time of capture.
+  uint64 round           = 2;
+  // 32-byte beacon randomness value.
+  bytes  randomness      = 3;
+  // BLS threshold signature for this round (verifiable against chain pubkey).
+  bytes  signature       = 4;
+  // Unix time in milliseconds when the agent completed the fetch.
+  int64  captured_at_ms  = 5;
+  // Round time published by drand (unix seconds). Server asserts
+  // |captured_at_ms/1000 - round_time_unix| < bound.
+  int64  round_time_unix = 6;
+}
+
+message HdrHistogram {
+  string syscall       = 1;
+  uint64 total_count   = 2;
+  double p50_ns        = 3;
+  double p90_ns        = 4;
+  double p99_ns        = 5;
+  double p999_ns       = 6;
+  double stddev_ns     = 7;
+  double mean_ns       = 8;
+  bytes  compact_blob  = 9;  // optional compressed full histogram
+}
+
+message SchedulerDigest {
+  double runqueue_delay_p50_ns = 1;
+  double runqueue_delay_p99_ns = 2;
+  uint64 context_switches      = 3;
+  uint64 voluntary_switches    = 4;
+  uint64 involuntary_switches  = 5;
+  double load_1m               = 6;
+}
+
+message FaultDigest {
+  uint64 minor_faults = 1;
+  uint64 major_faults = 2;
+}
+
+message SignedFrame {
+  bytes frame_blob = 1;  // serialized Frame message
+  bytes signature  = 2;  // Ed25519 signature over frame_blob
+}
+
+// ===========================================================================
+// Heartbeat (license pulse)
+// ===========================================================================
+
+message HeartbeatRequest {
+  string host_id        = 1;
+  uint64 sequence       = 2;
+  int64  timestamp_unix = 3;
+  bytes  signature      = 4;  // Ed25519 over sequence||timestamp||host_id
+}
+
+message HeartbeatResponse {
+  bool   license_valid    = 1;
+  bool   rotate_session   = 2;
+  bytes  new_encrypted_payload = 3;  // optional payload rotation
+  bytes  new_payload_nonce     = 4;
+  int64  server_timestamp_unix = 5;
+}
+
+// ===========================================================================
+// Kernel Sentinel — absence reports
+// ===========================================================================
+// After a restart, the agent drains its pinned eBPF ringbuf and ships any
+// absence events the kernel timer recorded while it was dead. Each event is
+// a moment at which the kernel detected that no pulse had been written to
+// pulse_map for > PULSE_TIMEOUT_NS (120 s). Because the timer is pinned in
+// bpffs, it keeps running across kill -9 / restart / upgrade cycles.
+message AbsenceEvent {
+  int64  detected_at_ms      = 1; // wall-clock of the kernel detection
+  int64  agent_last_seen_ms  = 2; // 0 when flags & never_saw_pulse
+  double gap_seconds         = 3;
+  uint32 cpu                 = 4;
+  uint32 flags               = 5; // bit 0 = never_saw_pulse
+  string comm                = 6;
+  uint64 last_seq            = 7;
+}
+
+message AbsenceReport {
+  string host_id          = 1;
+  string report_batch_id  = 2; // client-generated cuid, groups one drain
+  int64  drained_at_ms    = 3; // wall-clock when agent drained the ringbuf
+  repeated AbsenceEvent events = 4;
+}
+
+// ===========================================================================
+// W5a — PUF Attestation Layer (PAL)
+// ===========================================================================
+// The agent times several deterministic micro-benchmark loops on each CPU
+// core it is allowed to use. Per-core medians of these wall-clock rates are
+// a signature of the current physical silicon and its thermal/scheduling
+// envelope. They drift by < 1% on steady hardware but shift noticeably when
+// the VM moves to a different physical host or the disk is booted on a
+// clone. W5a compares attestations against an enrolled baseline using MAD-
+// normalised z-scores. Cryptographic key derivation (W5b) is deferred.
+
+// PufCellStats summarises one (core, loop-kind) cell across trials.
+// Median and MAD are preferred over mean and stddev because the iteration
+// rate distribution has heavy tails whenever a scheduling blip preempts
+// the pinned thread.
+message PufCellStats {
+  uint32 core         = 1;
+  string loop         = 2;  // "int" | "mem" | "br"
+  double median_ips   = 3;  // iters per second
+  double mad_ips      = 4;  // median absolute deviation
+  double cv           = 5;  // coefficient of variation (Welford stddev/mean)
+  double min_ips      = 6;
+  double max_ips      = 7;
+  uint32 num_samples  = 8;
+}
+
+message PufEnrollment {
+  string host_id          = 1;
+  repeated PufCellStats cells = 2;
+  uint32 num_cores        = 3;
+  uint32 num_loops        = 4;
+  uint32 num_trials       = 5;
+  string arch             = 6;
+  double duration_ms      = 7;
+  int64  measured_at_ms   = 8;
+  string agent_version    = 9;
+}
+
+message PufAttestation {
+  string host_id          = 1;
+  repeated PufCellStats cells = 2;
+  uint32 num_cores        = 3;
+  uint32 num_loops        = 4;
+  uint32 num_trials       = 5;
+  string arch             = 6;
+  double duration_ms      = 7;
+  int64  measured_at_ms   = 8;
+  string agent_version    = 9;
+}
+
+// ===========================================================================
+// W5b — PUF Key Derivation (Code-Offset Fuzzy Extractor)
+// ===========================================================================
+// W5a's z-score attestation tells the server "the silicon still feels right".
+// W5b goes further: it derives a 128-bit secret K from the silicon, *and* a
+// deterministic Ed25519 keypair from K, so that the server can demand
+// signed proofs that the agent currently has access to the original
+// silicon — without ever seeing K itself.
+//
+// Construction summary (see internal/puf/fuzzy.go):
+//   1. Calibration: M cycles of QuantizeV3 → identify reliable bit indices.
+//   2. Enrolment: pick random K (128 bits) → encode via Hamming(7,4) → XOR
+//      with PUF bits at the reliable indices to make the helper mask.
+//   3. Commitment = HKDF-SHA3-256(K, salt, "commit").
+//   4. Derived keypair: seed = HKDF-SHA3-256(K, salt, "ed25519-seed");
+//      Ed25519.PrivKeyFromSeed(seed); the public half is shipped at
+//      enrolment so the server can verify all subsequent proofs without
+//      ever holding K.
+//
+// The helper data is *public*: it leaks nothing about K to anyone who
+// does not also have the silicon, because XOR'ing a uniformly-random
+// PUF substring with a Hamming codeword is information-theoretically
+// indistinguishable from random bytes.
+
+message PufKeyEnrollment {
+  string host_id            = 1;
+  uint32 helper_version     = 2;  // matches puf.FuzzyKeyVersion
+  uint32 secret_bits        = 3;  // 128
+  uint32 mask_bits          = 4;  // 224 = (secret_bits / 4) * 7
+  repeated uint32 indices   = 5;  // mask_bits values; bit positions in QuantizeV3 output
+  bytes  mask               = 6;  // packed (mask_bits + 7) / 8 bytes
+  bytes  commitment         = 7;  // 32 bytes; lets the server confirm a Reproduce succeeded
+  bytes  derived_pubkey     = 8;  // 32-byte Ed25519 public key derived from K
+  uint32 calibration_cycles = 9;  // M used to estimate per-bit BER
+  double max_ber            = 10; // BER ceiling at index selection
+  uint32 reliable_pool      = 11; // total stable bits found (informational, ≥ mask_bits)
+  int64  enrolled_at_ms     = 12;
+  string agent_version      = 13;
+}
+
+// PufKeyProof: a signed assertion that the agent could reproduce K from
+// fresh silicon and therefore still controls the matching Ed25519 private
+// key. The agent picks its own nonce so the server cannot prevent honest
+// proofs by withholding a challenge; freshness is enforced by the
+// generated_at_ms field, which the server compares against its clock.
+message PufKeyProof {
+  string host_id          = 1;
+  bytes  nonce            = 2;  // 16 bytes random; reused across nothing
+  int64  generated_at_ms  = 3;  // unix millis, agent-claimed
+  bytes  signature        = 4;  // Ed25519 over host_id || nonce || generated_at_ms
+  string agent_version    = 5;
+}

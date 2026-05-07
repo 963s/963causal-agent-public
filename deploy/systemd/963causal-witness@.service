@@ -1,0 +1,73 @@
+# CAUSAL_963 DAQ witness — systemd unit template.
+#
+# This is a templated unit, instantiated per roster index. The
+# install script (scripts/install-witness.sh) drops a companion
+# EnvironmentFile at /etc/963causal/witness-%i.env that supplies
+# WITNESS_INDEX, WITNESS_LABEL, WITNESS_PORT, WITNESS_KEY_FILE and
+# WITNESS_TOKEN_FILE; systemd renders %i at start time.
+#
+#   sudo systemctl enable --now 963causal-witness@0
+#   sudo systemctl enable --now 963causal-witness@1
+#   ...
+#
+# Start order is irrelevant (witnesses are independent); failure of
+# one unit does not affect the others. The binary exits non-zero on
+# fatal config errors which triggers systemd's Restart=on-failure.
+
+[Unit]
+Description=CAUSAL_963 DAQ witness #%i
+Documentation=https://963causal.com/docs/deploy-witnesses
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=963causal
+Group=963causal
+EnvironmentFile=/etc/963causal/witness-%i.env
+ExecStart=/usr/local/bin/963causal-witness \
+  --addr ${WITNESS_ADDR} \
+  --index ${WITNESS_INDEX} \
+  --label ${WITNESS_LABEL} \
+  --key ${WITNESS_KEY_FILE} \
+  --auth-token-file ${WITNESS_TOKEN_FILE} \
+  --verify-drand=true \
+  --chain-pubkey ${WITNESS_CHAIN_PUBKEY} \
+  --drand-chain ${WITNESS_DRAND_CHAIN} \
+  --max-round-lag 4
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Hardening: the witness is a tiny HTTP service that only needs
+# read-access to its key/token files and write-access to stdout. We
+# drop every capability and forbid every system call namespace that
+# a signer does not need.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadOnlyPaths=/
+ReadWritePaths=/var/log/963causal
+
+# Resource caps. A witness handles at most a few signatures/second
+# in production; 128 MiB is generous.
+MemoryMax=128M
+CPUQuota=50%
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

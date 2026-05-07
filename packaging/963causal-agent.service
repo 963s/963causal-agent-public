@@ -1,0 +1,32 @@
+[Unit]
+Description=CAUSAL_963 Runtime Integrity agent
+Documentation=https://963causal.com/docs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=963causal
+Group=963causal
+ExecStart=/usr/bin/963causal-agent -config /etc/963causal/agent.yaml
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/963causal
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictNamespaces=true
+RestrictRealtime=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

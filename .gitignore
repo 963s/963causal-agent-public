@@ -1,0 +1,27 @@
+/bin/
+**/bin/
+/dist/
+963causal-agent
+*.exe
+*.test
+
+# Secrets & local identity (never commit)
+.env
+.env.*
+!.env.example
+**/host.key
+**/puf.keystore.json
+**/puf.keystore*.json
+
+# Logs & coverage
+coverage.out
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# bpf object artifacts (generated)
+**/bpf/*.o
+internal/sentinel/*.o
