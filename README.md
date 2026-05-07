@@ -70,11 +70,13 @@ Run:
 
 ## Check a Causal ID or certificate
 
-End users verify artefacts through the public site:
+After enroll the agent logs your **Causal ID** (same value stored server-side). End users check sealed artefacts on the public portal:
 
-https://963causal.com/verify
+**https://963causal.com/verify**
 
-Extra issuer specific flows (for example COSE exports) follow whatever your operator documents.
+Paste the ID or open a link such as `https://963causal.com/verify?cid=CID-963-…`. The platform runs PAL and CUSUM gates, attaches a **drand** temporal anchor when available, wraps evidence in **COSE Sign1**, and offers a dark **forensic PDF** plus raw CBOR. Insurance-oriented **EAR** CBOR files from the operator dashboard can be checked under the same page (upload flow).
+
+Independent CLI verification of PDF payloads may be added in a future agent release; today the authoritative path is the portal plus published verifier keys your operator documents.
 
 ## Hygiene of this tree
 
