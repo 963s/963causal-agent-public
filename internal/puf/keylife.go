@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -378,13 +379,7 @@ func toUint32s(in []int) []uint32 {
 	return out
 }
 
+// bytesEqual wraps crypto/subtle.ConstantTimeCompare for clarity.
 func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var v byte
-	for i := range a {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
+	return subtle.ConstantTimeCompare(a, b) == 1
 }

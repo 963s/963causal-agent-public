@@ -37,7 +37,9 @@ import (
 	agentpb "github.com/963causal/agent/proto"
 )
 
-const AgentVersion = "1.0.0"
+// AgentVersion is injected at build time via -ldflags="-X main.AgentVersion=...".
+// Defaults to "dev" for local builds.
+var AgentVersion = "dev"
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultPath, "path to agent.yaml")
@@ -53,6 +55,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("keystore: %v", err)
 	}
+	defer hk.Zero()
 
 	ctx, cancel := signalContext()
 	defer cancel()
@@ -75,6 +78,9 @@ func signalContext() (context.Context, context.CancelFunc) {
 
 func run(ctx context.Context, cfg *config.Config, hk *identity.HostKey, once bool) error {
 	log.Printf("963causal-agent %s starting, control_plane=%s", AgentVersion, cfg.ControlPlaneURL)
+	if cfg.InsecureSkipTLSVerify {
+		log.Printf("CRITICAL: insecure_skip_tls_verify is ENABLED — all egress is vulnerable to MITM. Do NOT use in production.")
+	}
 
 	lc := license.NewClient(cfg.ControlPlaneURL, cfg.InsecureSkipTLSVerify)
 
@@ -85,7 +91,7 @@ func run(ctx context.Context, cfg *config.Config, hk *identity.HostKey, once boo
 	defer ecdh.Zero()
 
 	enrollReq := buildEnroll(cfg, hk, ecdh)
-	enrollResp, err := lc.Enroll(ctx, enrollReq)
+	enrollResp, err := lc.RetryEnroll(ctx, enrollReq, 10)
 	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}
@@ -236,6 +242,8 @@ func run(ctx context.Context, cfg *config.Config, hk *identity.HostKey, once boo
 	pufKeyTick := time.NewTicker(puf.ProofInterval)
 	defer pufKeyTick.Stop()
 
+	const maxRetries = 3
+
 	ship := func() error {
 		sequence++
 		frame := buildFrame(ctx, enrollResp.HostId, sequence, probeCfg)
@@ -243,7 +251,7 @@ func run(ctx context.Context, cfg *config.Config, hk *identity.HostKey, once boo
 		if err != nil {
 			return err
 		}
-		return lc.PostFrame(ctx, enrollResp.AgentToken, signed)
+		return lc.PostFrameRetry(ctx, enrollResp.AgentToken, signed, maxRetries)
 	}
 
 	// First frame immediately so the dashboard lights up quickly.
@@ -259,7 +267,7 @@ func run(ctx context.Context, cfg *config.Config, hk *identity.HostKey, once boo
 	if pufKey != nil {
 		if proofPB, err := puf.ProveKey(ctx, enrollResp.HostId, AgentVersion, pufKey); err != nil {
 			log.Printf("puf-key: first proof failed: %v", err)
-		} else if err := lc.PostPufKeyProof(ctx, enrollResp.AgentToken, proofPB); err != nil {
+		} else if err := lc.PostPufKeyProofRetry(ctx, enrollResp.AgentToken, proofPB, maxRetries); err != nil {
 			log.Printf("puf-key: first proof upload failed: %v", err)
 		} else {
 			log.Printf("puf-key: first proof shipped (pubkey=%s…)",
@@ -303,10 +311,11 @@ func run(ctx context.Context, cfg *config.Config, hk *identity.HostKey, once boo
 				log.Printf("puf: attestation measurement failed: %v", err)
 				continue
 			}
-			if err := lc.PostPufAttestation(ctx, enrollResp.AgentToken, attestPB); err != nil {
+			if err := lc.PostPufAttestationRetry(ctx, enrollResp.AgentToken, attestPB, maxRetries); err != nil {
 				log.Printf("puf: attestation upload failed: %v", err)
 				continue
 			}
+			lastContact = time.Now()
 			log.Printf("puf: attestation shipped (%dc × %dl × %dt, %.0fms)",
 				attestPB.NumCores, attestPB.NumLoops, attestPB.NumTrials, attestPB.DurationMs)
 		case <-pufKeyTick.C:
@@ -318,10 +327,11 @@ func run(ctx context.Context, cfg *config.Config, hk *identity.HostKey, once boo
 				log.Printf("puf-key: proof measurement failed: %v", err)
 				continue
 			}
-			if err := lc.PostPufKeyProof(ctx, enrollResp.AgentToken, proofPB); err != nil {
+			if err := lc.PostPufKeyProofRetry(ctx, enrollResp.AgentToken, proofPB, maxRetries); err != nil {
 				log.Printf("puf-key: proof upload failed: %v", err)
 				continue
 			}
+			lastContact = time.Now()
 			log.Printf("puf-key: proof shipped (pubkey=%s…)",
 				pufKey.DerivedPubkeyHex()[:16])
 		case <-hbTick.C:
@@ -431,12 +441,22 @@ func buildFrame(ctx context.Context, hostID string, sequence uint64, pc *agentpb
 	witness := probe.SampleExternalWitness(witnessCtx)
 	witnessCancel()
 
+	// H-05 anti-replay: fresh 16-byte nonce per frame.
+	// Combined with GeneratedAtMs, this makes every SignedFrame unique
+	// and bounds the replay window to ±2×epoch even when drand is offline.
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		// rand.Read only errors on catastrophic RNG failure; log and continue
+		// with a zero nonce — the timestamp alone still bounds replay.
+		log.Printf("warn: frame nonce generation failed: %v", err)
+	}
+
 	return &agentpb.Frame{
-		HostId:     hostID,
-		Sequence:   sequence,
-		EpochStart: start.UnixMilli(),
-		EpochEnd:   time.Now().UnixMilli(),
-		SyscallHist: hists,
+		HostId:        hostID,
+		Sequence:      sequence,
+		EpochStart:    start.UnixMilli(),
+		EpochEnd:      time.Now().UnixMilli(),
+		SyscallHist:   hists,
 		Sched: &agentpb.SchedulerDigest{
 			ContextSwitches: sched.ContextSwitches,
 			Load_1M:         sched.Load1m,
@@ -445,10 +465,13 @@ func buildFrame(ctx context.Context, hostID string, sequence uint64, pc *agentpb
 			MinorFaults: faults.Minor,
 			MajorFaults: faults.Major,
 		},
-		Vertices:       vertices,
-		Genotype:       genotype,
-		HwFingerprint:  identity.HardwareFingerprint(),
-		TimeConsensus:  mstc,
-		Witness:        witness,
+		Vertices:      vertices,
+		Genotype:      genotype,
+		HwFingerprint: identity.HardwareFingerprint(),
+		TimeConsensus: mstc,
+		Witness:       witness,
+		// Anti-replay fields (H-05 fix) — both included in the signed frame_blob.
+		GeneratedAtMs: time.Now().UnixMilli(),
+		FrameNonce:    nonce[:],
 	}
 }

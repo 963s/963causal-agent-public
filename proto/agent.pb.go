@@ -380,7 +380,13 @@ type Frame struct {
 	// W3: External Witness — an unforgeable external reference (drand beacon)
 	// proving the agent was executing inside a specific real-time window that
 	// no offline adversary could have predicted in advance.
-	Witness       *ExternalWitness `protobuf:"bytes,12,opt,name=witness,proto3" json:"witness,omitempty"`
+	Witness *ExternalWitness `protobuf:"bytes,12,opt,name=witness,proto3" json:"witness,omitempty"`
+	// Anti-replay anchor (H-05): signed generation timestamp.
+	// Server MUST reject frames where |server_time - GeneratedAtMs| > 2*epoch_sec*1000.
+	GeneratedAtMs int64 `protobuf:"varint,13,opt,name=generated_at_ms,json=generatedAtMs,proto3" json:"generated_at_ms,omitempty"`
+	// Anti-replay nonce (H-05): 16 random bytes mixed into the signed payload.
+	// Server MUST track (host_id, frame_nonce) and reject duplicates.
+	FrameNonce    []byte `protobuf:"bytes,14,opt,name=frame_nonce,json=frameNonce,proto3" json:"frame_nonce,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -495,6 +501,20 @@ func (x *Frame) GetTimeConsensus() *TimeConsensusDigest {
 func (x *Frame) GetWitness() *ExternalWitness {
 	if x != nil {
 		return x.Witness
+	}
+	return nil
+}
+
+func (x *Frame) GetGeneratedAtMs() int64 {
+	if x != nil {
+		return x.GeneratedAtMs
+	}
+	return 0
+}
+
+func (x *Frame) GetFrameNonce() []byte {
+	if x != nil {
+		return x.FrameNonce
 	}
 	return nil
 }

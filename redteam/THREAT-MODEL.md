@@ -1,4 +1,12 @@
-# 963causal Threat Model (W8)
+# 963causal Threat Model (W8+)
+
+> **Revision**: 2026-05-08 — updated after the W8 Offensive Cryptographic
+> & Red-Team Audit. New findings: C-01 (mlock), C-02 (CT-compare),
+> C-03 (proc-spoofing), H-01 (σ-inflation), H-02 (low-and-slow),
+> H-03 (eBPF caps), H-04 (symlink), H-05 (replay). See §2.3 for full
+> catalogue. Remediation status tracked in §2.4.
+> **C-03 and H-05 resolved 2026-05-08** via direct CPUID/MIDR_EL1 reads
+> and signed frame timestamp+nonce binding.
 
 > **Audience:** security auditor, site-reliability engineer, or
 > customer's compliance officer deciding whether to rely on DAQ
@@ -43,21 +51,28 @@ What is **out of scope:**
 - Side-channel attacks on BLS12-381 pairings (kyber, kilic/bls12-381).
   We rely on the upstream library's constant-time guarantees.
 - Physical cold-boot RAM extraction while the agent is live.
-  PAL-derived keys are briefly materialised during Reproduce;
-  documented explicitly as the "TEE-gap" in BSL §11.6.
+  **Partially mitigated (W8 audit):** the Ed25519 host private key and
+  X25519 ephemeral are now locked via `unix.Mlock()` immediately after
+  allocation and the systemd unit sets `LimitMEMLOCK=8M`. The PUF
+  secret K lives in heap memory for only the duration of `Reproduce`;
+  full TEE encapsulation remains a future W9+ goal (BSL §11.6).
+- TPM/measured-boot chain (out of scope for W1–W8; future W10+).
 
 ## 2. Defence-in-depth map
 
 | Layer | Protocol role | Test evidence |
 |-------|----------------|----------------|
 | W3 — External Witness (drand) | Request freshness anchor | RT-007, RT-008 (`report.md`) |
-| W4 — Kernel Sentinel | Agent-is-alive detector | **Deferred** — requires `CAP_BPF` and a real `kill -9` cycle. See §3 below. |
+| W4 — Kernel Sentinel | Agent-is-alive detector | `CAP_BPF CAP_PERFMON` now granted in service file (W8 audit, H-03 fix). Manual procedure §3.3. |
 | W5a — PUF z-score attestation | Silicon-has-not-moved signal (per-cycle) | **Deferred** — requires an emulator + baseline pair. See §3. |
 | W5b — PUF-derived Ed25519 identity | Silicon-bound agent identity | RT-011 (`report.md`) |
 | W6 — DAQ (aggregate BDN + drand) | ≥ k independent endorsements per sensitive op | RT-001, RT-002, RT-003, RT-004, RT-005, RT-006, RT-012 |
 | W7 — Witness hardening | Auth + drand BLS verify + geographic distribution | RT-009, RT-010 (auth); RT-007, RT-008 (drand verify); geographic step is operator-driven (`deploy/docs/DEPLOY-WITNESSES.md`) |
 | W8.1 — Red-team suite | Empirical confirmation of all of the above | `cmd/redteam`, this document |
 | W8.2 — CUSUM drift detector | Cumulative silent-drift signal (slow poisoning) | RT-013 (`report.md`), `cmd/cusum-simulate`, unit tests in `internal/puf/cusum_test.go` |
+| W8.3 — Memory hardening | `mlock()` on secret key material; swap-out prevention | W8 audit C-01 fix — `identity.MlockSecret()`, `LimitMEMLOCK=8M` in service file |
+| W8.4 — CPUID cross-validation | Direct hardware register read cross-checks `/proc/cpuinfo`; mismatch = CRITICAL alert | W8 audit C-03 fix — `cpuid_amd64.s` + `cpuid_arm64.go` (MIDR_EL1 via kernfs) |
+| W8.5 — Frame replay prevention | Signed `generated_at_ms` + 16-byte `frame_nonce` in every `Frame` proto | W8 audit H-05 fix — `proto/agent.proto` fields 13–14, populated in `buildFrame` |
 
 ### 2.1 Catalogue of cryptographic attacks covered
 
@@ -123,6 +138,40 @@ is stable across reruns.
   and Lucas 1985. Detector has empirical ARL₀ ≈ 200 cycles under
   the null (measured over 400-cycle runs at p₀ = 0.5 %), far
   above any production recalibration cadence.
+
+- **CUSUM σ-inflation during calibration** (OPEN — H-01). An attacker
+  who controls the host during the first 8 calibration cycles can inflate
+  `σ` artificially, making the detector permanently insensitive. No
+  current `σ_max` ceiling is enforced. Mitigation requires an
+  architecture-specific `σ` bound derived from fleet baseline data.
+  See §3.6 for the manual reproduction procedure.
+
+- **Low-and-slow below CUSUM slack** (OPEN — H-02). Any per-cycle
+  Hamming shift `δ < K = 0.5σ` is absorbed by the slack parameter and
+  never accumulates. A rotating-bit attacker (different bit flipped each
+  cycle) can drift ~100 bits over 25 days without triggering either
+  detector. Mitigation: a 50-cycle Shewhart sliding-window complement to
+  the CUSUM. See §3.7 for the manual reproduction procedure.
+
+- **Frame replay before drand anchor** (✅ **FIXED — H-05**). `Frame`
+  proto now carries `generated_at_ms` (field 13) and `frame_nonce` (field 14),
+  both included in the serialised `frame_blob` that Ed25519 signs.
+  Any attacker who replays a captured frame intact will be rejected by
+  the server’s timestamp window check. Any attacker who edits `generated_at_ms`
+  to appear fresh breaks the signature. Nonce tracking prevents exact-copy
+  replay within the window. Implementation: `proto/agent.proto`, `proto/agent.pb.go`,
+  `cmd/963causal-agent/main.go:buildFrame`.
+
+- **HW fingerprint `/proc`-spoofing** (✅ **FIXED — C-03**). CPU identity
+  now comes from direct hardware register reads:
+  - **amd64**: `CPUID` instruction via `internal/identity/cpuid_amd64.s`
+    (leaves 0, 1, 0x80000002–4 for vendor, family/model/stepping, brand string).
+  - **arm64**: `MIDR_EL1` via `/sys/devices/system/cpu/cpu0/regs/identification/`
+    (kernfs path, not interceptable by `/proc`-layer rootkits).
+  At runtime, `HardwareFingerprint()` cross-validates the register value
+  against `/proc/cpuinfo`; a mismatch logs `CRITICAL` and uses the
+  hardware register value for the fingerprint hash.
+  Memory total now uses `sysinfo(2)` syscall before `/proc/meminfo`.
 
 ### 2.2 What RT-011 does NOT model
 
@@ -256,6 +305,38 @@ Procedure:
    looking up the current server identity instead of trusting
    the embedded one; that is a bug worth opening.
 
+## 3.6 CUSUM σ-inflation (targets H-01)
+
+Goal: prove that injecting controlled noise during calibration makes
+the detector permanently insensitive.
+
+Procedure:
+1. Enrol a host and immediately run 8 calibration cycles while a
+   CPU-burn process creates ~4× natural timing jitter.
+2. Capture the resulting CUSUM `σ` (should be inflated vs. the
+   fleet baseline ≈ 2.1 on Altra).
+3. Remove the CPU-burn process. Run 30 attestation cycles with
+   a Hamming shift of +5 bits/cycle (roughly 2.5× the natural δ).
+4. **Expected (if vulnerable):** zero CUSUM alarms. `σ_inflated`
+   means `H = 5σ_inflated` is too large for the attack to cross.
+5. **Fix:** add `if sigma > 6.0 { return error("calibration noise
+   exceeds σ_max=6.0") }` in `Calibrate()`.
+
+### 3.7 Low-and-slow CUSUM poisoning (targets H-02)
+
+Goal: prove that a rotating-bit attacker stays below both CUSUM paths.
+
+Procedure:
+1. Calibrate a fresh CUSUM on 20 clean cycles (`μ ≈ 4`, `σ ≈ 2.1`).
+2. Run `Observe()` for 100 cycles, each flipping a different bit
+   from the reliable-bit pool (simulate with `ComputeBitDelta`).
+   Hamming distance per cycle = 1 (below `K ≈ 1.05`).
+3. **Expected (if vulnerable):** `AggregateFired = false`,
+   `PerBitFired = false` throughout all 100 cycles. The fingerprint
+   has drifted 100 bits but the detector never fired.
+4. **Fix:** implement a 50-cycle sliding Shewhart chart on the
+   Hamming distance mean and add it as a `SLOW_DRIFT` verdict level.
+
 ## 4. Known gaps, deferred to later phases
 
 - **W8 Phase 3.** Repeat the cryptographic attacks against the
@@ -264,6 +345,12 @@ Procedure:
   transaction, replay of a `DaqTicket` JSON against the
   `/verify` endpoint, `/api/admin/hosts/:id/delete` under
   adversarial conditions.
+- **CUSUM σ_max ceiling (H-01).** Add an architecture-specific
+  upper bound on calibration `σ` in `Calibrate()`. Fleet data
+  required to set the constant per CPU family.
+- **CUSUM Shewhart complement (H-02).** 50-cycle sliding mean
+  detector for sub-slack low-and-slow attacks, emitting
+  `SLOW_DRIFT` verdict. See §3.7.
 - **CUSUM server integration.** The detector is proven in
   simulation and via RT-013; the Prisma state table + /api/agent/puf/attest
   wiring + recalibration-gate hook are still TODO (BSL §13.8).
@@ -275,6 +362,11 @@ Procedure:
   agent RAM during Reproduce. A future phase ties K to an SEV-SNP
   / TDX / ARM CCA attestation so the Reproduce path stays
   entirely inside the enclave. BSL §11.6 tracks this.
+- **Server-side frame replay enforcement.** The agent now signs
+  `generated_at_ms` and `frame_nonce` in every frame, but the
+  server must enforce the timestamp window (`|recv−gen| ≤ 2×epoch`)
+  and track nonces in a short-lived Redis/Postgres set. This is
+  a server-side TODO; the cryptographic foundation is laid.
 
 ## 5. Running the harness
 

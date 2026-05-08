@@ -14,15 +14,40 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"golang.org/x/crypto/curve25519"
+	"golang.org/x/sys/unix"
 )
+
+// MlockSecret attempts to lock a byte slice into physical RAM so it
+// cannot be swapped to disk. Logs a warning on failure instead of
+// crashing — mlock is defence-in-depth, not a hard gate.
+// On non-Linux platforms this is a no-op.
+func MlockSecret(b []byte) {
+	if runtime.GOOS != "linux" || len(b) == 0 {
+		return
+	}
+	if err := unix.Mlock(b); err != nil {
+		log.Printf("warn: mlock(%d bytes) failed: %v (secret may be swappable)", len(b), err)
+	}
+}
 
 type HostKey struct {
 	EdPublic  ed25519.PublicKey
 	EdPrivate ed25519.PrivateKey
+}
+
+// Zero wipes the private key material from memory. Call at process
+// shutdown for defence-in-depth; the key cannot be recovered without
+// reloading from disk.
+func (hk *HostKey) Zero() {
+	for i := range hk.EdPrivate {
+		hk.EdPrivate[i] = 0
+	}
 }
 
 type persisted struct {
@@ -54,7 +79,9 @@ func LoadOrCreate(path string) (*HostKey, error) {
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return nil, fmt.Errorf("invalid public key length")
 	}
-	return &HostKey{EdPublic: pub, EdPrivate: priv}, nil
+	hk := &HostKey{EdPublic: pub, EdPrivate: priv}
+	MlockSecret(hk.EdPrivate)
+	return hk, nil
 }
 
 func generate(path string) (*HostKey, error) {
@@ -71,13 +98,21 @@ func generate(path string) (*HostKey, error) {
 	if err := writeAtomic(path, b, 0o600); err != nil {
 		return nil, err
 	}
-	return &HostKey{EdPublic: pub, EdPrivate: priv}, nil
+	hk := &HostKey{EdPublic: pub, EdPrivate: priv}
+	MlockSecret(hk.EdPrivate)
+	return hk, nil
 }
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".963causal-key-*.tmp")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	if _, err := f.Write(data); err != nil {

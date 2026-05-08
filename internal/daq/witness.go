@@ -331,16 +331,9 @@ func parseWitnessRequest(r *WitnessRequestJSON) (*parsedWitnessRequest, error) {
 	}, nil
 }
 
-// bytesEqualConst is a small constant-time compare for drand sigs.
-// Intentionally separate from fuzzy.equalConstantTime so daq has no
+// bytesEqualConst wraps crypto/subtle.ConstantTimeCompare for clarity.
+// Intentionally separate from puf.equalConstantTime so daq has no
 // implicit dependency on the puf package.
 func bytesEqualConst(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var v byte
-	for i := range a {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
+	return subtle.ConstantTimeCompare(a, b) == 1
 }

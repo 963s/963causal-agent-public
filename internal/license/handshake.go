@@ -10,6 +10,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
+	"math/rand"
 	"net/http"
 	"time"
 
@@ -176,6 +178,124 @@ func truncate(b []byte, max int) string {
 		return string(b)
 	}
 	return string(b[:max]) + "…"
+}
+
+// retryPost wraps post() with exponential backoff + jitter.
+// It retries up to maxAttempts times on transient failures (network
+// errors, 5xx responses). Context cancellation aborts immediately.
+//
+// Backoff schedule: base 2s, multiplied by 2^attempt, capped at 60s,
+// plus uniform jitter in [-500ms, +500ms].
+func (c *Client) retryPost(ctx context.Context, path string, body []byte, token string, maxAttempts int) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result, err := c.post(ctx, path, body, token)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if attempt+1 >= maxAttempts {
+			break
+		}
+		backoff := backoffDuration(attempt)
+		log.Printf("retry: POST %s attempt %d/%d failed: %v (backoff %s)",
+			path, attempt+1, maxAttempts, err, backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("all %d attempts failed for POST %s: %w", maxAttempts, path, lastErr)
+}
+
+// backoffDuration returns the backoff sleep for a given attempt index.
+// Base 2s × 2^attempt, capped at 60s, plus ±500ms uniform jitter.
+func backoffDuration(attempt int) time.Duration {
+	base := 2 * time.Second
+	shift := uint(attempt)
+	if shift > 5 {
+		shift = 5 // cap multiplier at 2^5 = 32 → 64s before jitter
+	}
+	d := base << shift
+	if d > 60*time.Second {
+		d = 60 * time.Second
+	}
+	// Uniform jitter ±500ms.
+	jitter := time.Duration(rand.Int63n(int64(time.Second))) - 500*time.Millisecond
+	d += jitter
+	if d < 500*time.Millisecond {
+		d = 500 * time.Millisecond
+	}
+	return d
+}
+
+// PostFrameRetry is PostFrame with exponential backoff. The agent
+// main loop should prefer this over PostFrame to survive transient
+// network outages without silently dropping telemetry.
+func (c *Client) PostFrameRetry(ctx context.Context, token string, signed *agentpb.SignedFrame, maxAttempts int) error {
+	body, err := proto.Marshal(signed)
+	if err != nil {
+		return fmt.Errorf("marshal frame: %w", err)
+	}
+	_, err = c.retryPost(ctx, "/api/agent/frame", body, token, maxAttempts)
+	return err
+}
+
+// PostPufAttestationRetry is PostPufAttestation with exponential backoff.
+func (c *Client) PostPufAttestationRetry(ctx context.Context, token string, rep *agentpb.PufAttestation, maxAttempts int) error {
+	body, err := proto.Marshal(rep)
+	if err != nil {
+		return fmt.Errorf("marshal puf attestation: %w", err)
+	}
+	_, err = c.retryPost(ctx, "/api/agent/puf/attest", body, token, maxAttempts)
+	return err
+}
+
+// PostPufKeyProofRetry is PostPufKeyProof with exponential backoff.
+func (c *Client) PostPufKeyProofRetry(ctx context.Context, token string, rep *agentpb.PufKeyProof, maxAttempts int) error {
+	body, err := proto.Marshal(rep)
+	if err != nil {
+		return fmt.Errorf("marshal puf key proof: %w", err)
+	}
+	_, err = c.retryPost(ctx, "/api/agent/puf/key/proof", body, token, maxAttempts)
+	return err
+}
+
+// RetryEnroll wraps Enroll with exponential backoff so the agent
+// survives a temporarily-down control plane at boot time instead
+// of crash-looping via Fatalf.
+func (c *Client) RetryEnroll(ctx context.Context, req *agentpb.EnrollRequest, maxAttempts int) (*agentpb.EnrollResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, err := c.Enroll(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if attempt+1 >= maxAttempts {
+			break
+		}
+		backoff := backoffDuration(attempt)
+		log.Printf("retry: enroll attempt %d/%d failed: %v (backoff %s)",
+			attempt+1, maxAttempts, err, backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("enroll failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // SignFrame signs a Frame blob with the host Ed25519 private key.

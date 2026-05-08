@@ -36,12 +36,33 @@ import (
 	"math"
 	"runtime"
 	"sort"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	agentpb "github.com/963causal/agent/proto"
 )
+
+// mstcBufs holds the eight measurement slices so they can be recycled
+// between frames via sync.Pool instead of allocating ~135 KB per call.
+type mstcBufs struct {
+	hw, hw2, vdso, sc             []uint64
+	latHW, latHW2, latVDSO, latSC []uint64
+}
+
+var mstcPool = sync.Pool{
+	New: func() any { return &mstcBufs{} },
+}
+
+// ensureCap returns buf with len == n, reusing the backing array when
+// its capacity is sufficient.
+func ensureCap(buf []uint64, n int) []uint64 {
+	if cap(buf) >= n {
+		return buf[:n]
+	}
+	return make([]uint64, n)
+}
 
 // MSTCConfig controls the probe. Defaults are tuned for <5 ms wallclock
 // cost per frame on a 2 vCPU machine.
@@ -79,16 +100,26 @@ func SampleMSTC(cfgOpt ...MSTCConfig) *agentpb.TimeConsensusDigest {
 	defer runtime.UnlockOSThread()
 
 	n := cfg.Samples + cfg.WarmupRounds
-	hw := make([]uint64, n)
-	hw2 := make([]uint64, n)
-	vdso := make([]uint64, n)
-	sc := make([]uint64, n)
+	bufs := mstcPool.Get().(*mstcBufs)
+	bufs.hw = ensureCap(bufs.hw, n)
+	bufs.hw2 = ensureCap(bufs.hw2, n)
+	bufs.vdso = ensureCap(bufs.vdso, n)
+	bufs.sc = ensureCap(bufs.sc, n)
+	bufs.latHW = ensureCap(bufs.latHW, n)
+	bufs.latHW2 = ensureCap(bufs.latHW2, n)
+	bufs.latVDSO = ensureCap(bufs.latVDSO, n)
+	bufs.latSC = ensureCap(bufs.latSC, n)
+	defer mstcPool.Put(bufs)
+	hw := bufs.hw
+	hw2 := bufs.hw2
+	vdso := bufs.vdso
+	sc := bufs.sc
 	// Read latencies (in hardware ticks) for each source. Using HW ticks
 	// gives ns after dividing by hwHz.
-	latHW := make([]uint64, n)
-	latHW2 := make([]uint64, n)
-	latVDSO := make([]uint64, n)
-	latSC := make([]uint64, n)
+	latHW := bufs.latHW
+	latHW2 := bufs.latHW2
+	latVDSO := bufs.latVDSO
+	latSC := bufs.latSC
 
 	// Tight sample loop.
 	for i := 0; i < n; i++ {

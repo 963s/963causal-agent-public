@@ -3,6 +3,7 @@ package puf
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -262,16 +263,7 @@ func xorBytes(a, b []byte) []byte {
 	return out
 }
 
-// equalConstantTime is a hand-rolled constant-time compare. Avoids
-// pulling in subtle just for one call; both inputs are 32 bytes from
-// SHA3-256 truncations so the runtime is constant by construction.
+// equalConstantTime wraps crypto/subtle.ConstantTimeCompare for clarity.
 func equalConstantTime(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var v byte
-	for i := range a {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
+	return subtle.ConstantTimeCompare(a, b) == 1
 }

@@ -90,7 +90,23 @@ message Frame {
   // proving the agent was executing inside a specific real-time window that
   // no offline adversary could have predicted in advance.
   ExternalWitness witness = 12;
+
+  // Anti-replay anchor (H-05 fix).
+  // generated_at_ms is the unix millisecond timestamp at which the agent
+  // constructed and signed this frame. The server MUST reject frames where
+  // |server_receive_time_ms - generated_at_ms| > 2 * frame_epoch_sec * 1000.
+  // This bounds the replay window to at most one epoch, even when the drand
+  // witness is unavailable.
+  int64  generated_at_ms = 13;
+
+  // frame_nonce is 16 bytes of cryptographically-random data mixed into
+  // the signed payload so that two frames produced at the same instant
+  // with identical sensor readings have distinct signatures. The server
+  // MUST track (host_id, frame_nonce) pairs in a short-lived set and
+  // reject duplicates within the replay window.
+  bytes  frame_nonce    = 14;
 }
+
 
 // ===========================================================================
 // W3 Physics Layer digests

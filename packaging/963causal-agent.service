@@ -16,8 +16,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/963causal
-CapabilityBoundingSet=
-AmbientCapabilities=
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON
+AmbientCapabilities=CAP_BPF CAP_PERFMON
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictNamespaces=true
@@ -27,6 +27,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 SystemCallArchitectures=native
+LimitMEMLOCK=8388608
 
 [Install]
 WantedBy=multi-user.target
